@@ -40,7 +40,7 @@ We provide pretrained models for different scenarios:
 
 | Model | Hugging Face Model | ModelScope Model | Description |
 |-------|-----------|-----------|-------------|
-| LingBot-Depth-v0.5 | [robbyant/lingbot-depth-pretrain-vitl-14-v0.5](https://huggingface.co/robbyant/lingbot-depth-pretrain-vitl-14-v0.5/tree/main) | [robbyant/lingbot-depth-pretrain-vitl-14-v0.5](https://www.modelscope.cn/models/Robbyant/lingbot-depth-pretrain-vitl-14-v0.5)| ⭐ **Recommended!** General-purpose depth refinement and completion (fixes the bug in LingBot-Depth-v0.1)|
+| LingBot-Depth-v0.5 | [robbyant/lingbot-depth-pretrain-vitl-14-v0.5](https://huggingface.co/robbyant/lingbot-depth-pretrain-vitl-14-v0.5/tree/main) | [robbyant/lingbot-depth-pretrain-vitl-14-v0.5](https://www.modelscope.cn/models/Robbyant/lingbot-depth-pretrain-vitl-14-v0.5)| ⭐ **Recommended!** General-purpose depth refinement and completion for both dense and sparse raw depth(fixes the bug in LingBot-Depth-v0.1)|
 | LingBot-Depth-v0.1 | [robbyant/lingbot-depth-pretrain-vitl-14](https://huggingface.co/robbyant/lingbot-depth-pretrain-vitl-14/tree/main) | [robbyant/lingbot-depth-pretrain-vitl-14](https://www.modelscope.cn/models/Robbyant/lingbot-depth-pretrain-vitl-14)| General-purpose depth refinement |
 | LingBot-Depth-DC | [robbyant/lingbot-depth-postrain-dc-vitl14](https://huggingface.co/robbyant/lingbot-depth-postrain-dc-vitl14/tree/main) | [robbyant/lingbot-depth-postrain-dc-vitl14](https://www.modelscope.cn/models/Robbyant/lingbot-depth-postrain-dc-vitl14)| Optimized for sparse depth completion |
 
