@@ -18,6 +18,22 @@ from .modules_decoder import MLP, ConvStack
 from ..utils.geo import depth_to_pointcloud, normalized_view_plane_uv
 
 
+def get_autocast_dtype(device: torch.device) -> torch.dtype:
+    """Select appropriate dtype for autocast based on GPU capability.
+    
+    Uses bfloat16 on newer GPUs (compute capability >= 8.0, e.g., A100+),
+    falls back to float16 on older GPUs.
+    """
+    if device.type == 'cuda':
+        try:
+            compute_capability = torch.cuda.get_device_capability(device.index or 0)
+            if compute_capability[0] >= 8:
+                return torch.bfloat16
+        except (RuntimeError, AttributeError):
+            pass
+    return torch.float16
+
+
 class MDMModel(nn.Module):
     encoder: Union[DINOv2_RGBD_Encoder]
     neck: ConvStack
@@ -199,7 +215,8 @@ class MDMModel(nn.Module):
             num_tokens = int(min_tokens + (resolution_level / 9) * (max_tokens - min_tokens))
 
         # Forward pass
-        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=use_fp16 and self.dtype != torch.bfloat16):
+        autocast_dtype = get_autocast_dtype(self.device)
+        with torch.autocast(device_type=self.device.type, dtype=autocast_dtype, enabled=use_fp16 and self.dtype != autocast_dtype):
             output = self.forward(image, num_tokens=num_tokens, depth=depth_in, **kwargs)
         depth_reg, mask = (output.get(k, None) for k in ['depth_reg', 'mask'])
 
@@ -291,7 +308,8 @@ class MDMModel(nn.Module):
             num_tokens = int(min_tokens + (resolution_level / 9) * (max_tokens - min_tokens))
 
         # Forward pass
-        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=use_fp16 and self.dtype != torch.bfloat16):
+        autocast_dtype = get_autocast_dtype(self.device)
+        with torch.autocast(device_type=self.device.type, dtype=autocast_dtype, enabled=use_fp16 and self.dtype != autocast_dtype):
             features, cls_token = self.forward_feat(image, num_tokens=num_tokens, depth=depth_in, **kwargs)
         
         return features, cls_token
