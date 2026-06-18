@@ -1,6 +1,7 @@
 from typing import *
 from numbers import Number
 from functools import partial
+from contextlib import nullcontext
 from pathlib import Path
 import warnings
 
@@ -18,11 +19,17 @@ from .modules_decoder import MLP, ConvStack
 from ..utils.geo import depth_to_pointcloud, normalized_view_plane_uv
 
 
-def get_autocast_dtype(device: torch.device) -> torch.dtype:
-    """Select appropriate dtype for autocast based on GPU capability.
-    
-    Uses bfloat16 on newer GPUs (compute capability >= 8.0, e.g., A100+),
-    falls back to float16 on older GPUs.
+def get_autocast_dtype(device: torch.device) -> Optional[torch.dtype]:
+    """Select the autocast dtype for ``device``, or ``None`` to stay in fp32.
+
+    CUDA: bfloat16 on newer GPUs (compute capability >= 8.0, e.g. A100+),
+    falling back to float16 on older GPUs.
+
+    CPU: ``None`` (full fp32). CPUs without native bf16/fp16 compute units —
+    i.e. essentially all x86 outside recent AVX512-BF16 / AMX server parts —
+    *emulate* low precision, which runs many times slower than plain fp32.
+    Keeping CPU inference in fp32 is both faster and the only numerically sane
+    option there (``torch`` CPU autocast accepts only bf16/fp16, never fp32).
     """
     if device.type == 'cuda':
         try:
@@ -31,7 +38,8 @@ def get_autocast_dtype(device: torch.device) -> torch.dtype:
                 return torch.bfloat16
         except (RuntimeError, AttributeError):
             pass
-    return torch.float16
+        return torch.float16
+    return None
 
 
 class MDMModel(nn.Module):
@@ -108,10 +116,7 @@ class MDMModel(nn.Module):
     def init_weights(self):
         self.encoder.init_weights()
 
-    def enable_pytorch_native_sdpa(self):
-        self.encoder.enable_pytorch_native_sdpa()
-    
-    def forward(self, 
+    def forward(self,
                 image: torch.Tensor, 
                 num_tokens: Union[int, torch.LongTensor], 
                 depth: Union[None, torch.Tensor]=None, 
@@ -216,13 +221,18 @@ class MDMModel(nn.Module):
 
         # Forward pass
         autocast_dtype = get_autocast_dtype(self.device)
-        with torch.autocast(device_type=self.device.type, dtype=autocast_dtype, enabled=use_fp16 and self.dtype != autocast_dtype):
+        if use_fp16 and autocast_dtype is not None and self.dtype != autocast_dtype:
+            autocast_ctx = torch.autocast(device_type=self.device.type, dtype=autocast_dtype)
+        else:
+            # fp32 (e.g. on CPU, where low-precision autocast is emulated and slow)
+            autocast_ctx = nullcontext()
+        with autocast_ctx:
             output = self.forward(image, num_tokens=num_tokens, depth=depth_in, **kwargs)
         depth_reg, mask = (output.get(k, None) for k in ['depth_reg', 'mask'])
 
         # Always process the output in fp32 precision
         depth_reg, mask = map(lambda x: x.float() if isinstance(x, torch.Tensor) else x, [depth_reg, mask])
-        with torch.autocast(device_type=self.device.type, dtype=torch.float32):
+        with torch.autocast(device_type=self.device.type, enabled=False):
             if mask is not None:
                 mask_binary = mask > 0.5
             else:
@@ -309,7 +319,12 @@ class MDMModel(nn.Module):
 
         # Forward pass
         autocast_dtype = get_autocast_dtype(self.device)
-        with torch.autocast(device_type=self.device.type, dtype=autocast_dtype, enabled=use_fp16 and self.dtype != autocast_dtype):
+        if use_fp16 and autocast_dtype is not None and self.dtype != autocast_dtype:
+            autocast_ctx = torch.autocast(device_type=self.device.type, dtype=autocast_dtype)
+        else:
+            # fp32 (e.g. on CPU, where low-precision autocast is emulated and slow)
+            autocast_ctx = nullcontext()
+        with autocast_ctx:
             features, cls_token = self.forward_feat(image, num_tokens=num_tokens, depth=depth_in, **kwargs)
-        
+
         return features, cls_token

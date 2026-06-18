@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .dinov2_rgbd.models.vision_transformer import DinoVisionTransformer
-from .utils import wrap_dinov2_attention_with_sdpa, wrap_module_with_gradient_checkpointing
+from .utils import wrap_module_with_gradient_checkpointing
 
 
 class DINOv2_RGBD_Encoder(nn.Module):
@@ -87,11 +87,7 @@ class DINOv2_RGBD_Encoder(nn.Module):
         for i in range(len(self.backbone.blocks)):
             wrap_module_with_gradient_checkpointing(self.backbone.blocks[i])
 
-    def enable_pytorch_native_sdpa(self):
-        for i in range(len(self.backbone.blocks)):
-            wrap_dinov2_attention_with_sdpa(self.backbone.blocks[i].attn)
-
-    def forward(self, 
+    def forward(self,
                 image: torch.Tensor, 
                 depth: torch.Tensor, 
                 token_rows: Union[int, torch.LongTensor], 

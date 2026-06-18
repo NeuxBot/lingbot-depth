@@ -11,6 +11,46 @@ Usage:
     python example.py --example 0 --output custom_output
 """
 
+import os
+
+
+def _physical_core_count() -> int:
+    """Best-effort count of physical (non-hyperthread) CPU cores.
+
+    For this compute-bound model, using hyperthreads badly hurts throughput, so
+    when detection is uncertain we deliberately under-count rather than over.
+    """
+    # Linux: count unique (physical id, core id) pairs in /proc/cpuinfo.
+    try:
+        cores, cur = set(), {}
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    if "core id" in cur:
+                        cores.add((cur.get("physical id", "0"), cur["core id"]))
+                    cur = {}
+                elif ":" in line:
+                    key, val = line.split(":", 1)
+                    cur[key.strip()] = val.strip()
+        if cores:
+            return len(cores)
+    except OSError:
+        pass
+    # Fallback: assume 2 hyperthreads per core when the logical count is even.
+    logical = os.cpu_count() or 1
+    return max(1, logical // 2) if logical >= 4 else logical
+
+
+# Pin the BLAS / OpenMP thread pools to the physical core count *before* importing
+# numpy / torch / cv2 (these read the env only at load time). torch ships with
+# OpenBLAS, which otherwise spawns one thread per *logical* core and nests inside
+# torch's own thread pool — oversubscribing the CPU and slowing inference 10-20x.
+# Any value the user already exported is left untouched.
+_n_threads = str(_physical_core_count())
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, _n_threads)
+
 import cv2
 import torch
 import numpy as np
@@ -19,6 +59,9 @@ import argparse
 import time
 from pathlib import Path
 from mdm.model.v2 import MDMModel
+
+# Keep torch's intra-op pool consistent with the BLAS pool set above.
+torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))
 
 
 def preprocess_input_image(image_path, device):
@@ -200,6 +243,13 @@ Examples:
         '--no-mask', action='store_true',
         help='Disable masking of invalid regions'
     )
+    parser.add_argument(
+        '--resolution-level', type=int, default=9, choices=range(0, 10),
+        metavar='[0-9]',
+        help='Inference resolution / token budget (default: 9 = highest quality). '
+             'Lower values are much faster on CPU (attention cost grows ~quadratically '
+             'with resolution) at some loss of detail.'
+    )
 
     args = parser.parse_args()
 
@@ -217,6 +267,8 @@ Examples:
     print(f"\n📱 Device: {device}")
     if device.type == 'cuda':
         print(f"   GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print(f"   CPU threads: {torch.get_num_threads()} (resolution_level={args.resolution_level})")
 
     # Setup paths
     example_dir = Path('examples') / args.example
@@ -302,6 +354,7 @@ Examples:
                 image_tensor,
                 depth_in=depth_tensor,
                 apply_mask=not args.no_mask,
+                resolution_level=args.resolution_level,
                 intrinsics=intrinsics_tensor
             )
         inference_time = time.time() - start_time

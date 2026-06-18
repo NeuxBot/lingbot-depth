@@ -11,6 +11,7 @@ import logging
 import os
 import warnings
 
+import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch import nn
@@ -32,6 +33,71 @@ try:
 except ImportError:
     XFORMERS_AVAILABLE = False
     # warnings.warn("xFormers is not available (Attention)")
+
+
+def use_xformers(x: Tensor) -> bool:
+    """Whether to use xFormers' memory-efficient attention for tensor ``x``.
+
+    xFormers' ``memory_efficient_attention`` is a CUDA kernel, so it is only
+    selected when xFormers is installed *and* the data lives on a CUDA device.
+    On CPU (or CUDA without xFormers) we fall back to PyTorch's native scaled
+    dot-product attention, which is the fastest portable option there.
+    """
+    return XFORMERS_AVAILABLE and x.is_cuda
+
+
+class BlockDiagonalAttnMask:
+    """Pure-PyTorch stand-in for xFormers' ``BlockDiagonalMask``.
+
+    Used on the SDPA path (CPU, or CUDA without xFormers) to pack several
+    variable-length sequences into a single batch element while restricting
+    attention to within each sequence. A single sequence needs no mask at all
+    (full attention), which keeps the common batch-size-1 inference path on the
+    fast, unmasked SDPA kernel.
+    """
+
+    def __init__(self, seqlens) -> None:
+        self.seqlens = [int(s) for s in seqlens]
+        self._mask_cache = {}
+
+    @classmethod
+    def from_seqlens(cls, seqlens) -> "BlockDiagonalAttnMask":
+        return cls(seqlens)
+
+    def split(self, x: Tensor):
+        """Split a packed ``(1, sum(seqlens), ...)`` tensor back into a list."""
+        return list(x.split(self.seqlens, dim=1))
+
+    def materialize(self, device: torch.device):
+        """Boolean attention mask (``True`` keeps) of shape ``(N, N)``.
+
+        Returns ``None`` for a single sequence so SDPA can use its fastest
+        unmasked kernel. Masks are cached per-device since the same mask object
+        is reused across every transformer block in a forward pass.
+        """
+        if len(self.seqlens) <= 1:
+            return None
+        key = (device.type, device.index)
+        mask = self._mask_cache.get(key)
+        if mask is None:
+            total = sum(self.seqlens)
+            mask = torch.zeros(total, total, dtype=torch.bool, device=device)
+            start = 0
+            for s in self.seqlens:
+                end = start + s
+                mask[start:end, start:end] = True
+                start = end
+            self._mask_cache[key] = mask
+        return mask
+
+
+def _to_sdpa_mask(attn_bias, device: torch.device):
+    """Convert ``attn_bias`` into a mask accepted by ``F.scaled_dot_product_attention``."""
+    if attn_bias is None:
+        return None
+    if isinstance(attn_bias, BlockDiagonalAttnMask):
+        return attn_bias.materialize(device)
+    return attn_bias  # already a tensor mask
 
 
 class Attention(nn.Module):
@@ -73,8 +139,8 @@ class Attention(nn.Module):
 
         q, k, v = qkv.unbind(0)      # (B, H, N, C // H)
 
-        x = F.scaled_dot_product_attention(q, k, v, attn_bias)
-        x = x.permute(0, 2, 1, 3).reshape(B, N, C) 
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=_to_sdpa_mask(attn_bias, x.device))
+        x = x.permute(0, 2, 1, 3).reshape(B, N, C)
 
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -82,10 +148,11 @@ class Attention(nn.Module):
 
 class MemEffAttention(Attention):
     def forward(self, x: Tensor, attn_bias=None) -> Tensor:
-        if not XFORMERS_AVAILABLE:
-            if attn_bias is not None:
-                raise AssertionError("xFormers is required for using nested tensors")
-            return super().forward(x)
+        # On CUDA with xFormers, use its memory-efficient attention kernel.
+        # Otherwise (CPU, or CUDA without xFormers) fall back to PyTorch's
+        # native SDPA, handled by the base class.
+        if not use_xformers(x):
+            return super().forward(x, attn_bias)
 
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)

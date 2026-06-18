@@ -15,7 +15,7 @@ import warnings
 import torch
 from torch import nn, Tensor
 
-from .attention import Attention, MemEffAttention
+from .attention import Attention, MemEffAttention, BlockDiagonalAttnMask, use_xformers
 from .drop_path import DropPath
 from .layer_scale import LayerScale
 from .mlp import Mlp
@@ -166,14 +166,22 @@ def get_attn_bias_and_cat(x_list, branges=None):
     """
     batch_sizes = [b.shape[0] for b in branges] if branges is not None else [x.shape[0] for x in x_list]
     all_shapes = tuple((b, x.shape[1]) for b, x in zip(batch_sizes, x_list))
-    if all_shapes not in attn_bias_cache.keys():
+    # Match the attention backend chosen at runtime (see MemEffAttention): the
+    # xFormers BlockDiagonalMask only works with the xFormers CUDA kernel, so
+    # build a pure-PyTorch mask whenever we will run SDPA instead.
+    xformers_path = use_xformers(x_list[0])
+    cache_key = (all_shapes, xformers_path)
+    if cache_key not in attn_bias_cache.keys():
         seqlens = []
         for b, x in zip(batch_sizes, x_list):
             for _ in range(b):
                 seqlens.append(x.shape[1])
-        attn_bias = fmha.BlockDiagonalMask.from_seqlens(seqlens)
-        attn_bias._batch_sizes = batch_sizes
-        attn_bias_cache[all_shapes] = attn_bias
+        if xformers_path:
+            attn_bias = fmha.BlockDiagonalMask.from_seqlens(seqlens)
+            attn_bias._batch_sizes = batch_sizes
+        else:
+            attn_bias = BlockDiagonalAttnMask.from_seqlens(seqlens)
+        attn_bias_cache[cache_key] = attn_bias
 
     if branges is not None:
         cat_tensors = index_select_cat([x.flatten(1) for x in x_list], branges).view(1, -1, x_list[0].shape[-1])
@@ -181,7 +189,7 @@ def get_attn_bias_and_cat(x_list, branges=None):
         tensors_bs1 = tuple(x.reshape([1, -1, *x.shape[2:]]) for x in x_list)
         cat_tensors = torch.cat(tensors_bs1, dim=1)
 
-    return attn_bias_cache[all_shapes], cat_tensors
+    return attn_bias_cache[cache_key], cat_tensors
 
 
 def drop_add_residual_stochastic_depth_list(
@@ -252,8 +260,8 @@ class NestedTensorBlock(Block):
         if isinstance(x_or_x_list, Tensor):
             return super().forward(x_or_x_list)
         elif isinstance(x_or_x_list, list):
-            if not XFORMERS_AVAILABLE:
-                raise AssertionError("xFormers is required for using nested tensors")
+            # Variable-length nested tensors are supported on both the xFormers
+            # path and the native SDPA path (via BlockDiagonalAttnMask).
             return self.forward_nested(x_or_x_list)
         else:
             raise AssertionError
